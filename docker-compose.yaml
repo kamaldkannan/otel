@@ -1,0 +1,188 @@
+version: "3.8"
+
+services:
+
+  loki:
+    image: grafana/loki:2.4.2
+    command: -config.file=/etc/loki/loki-local.yaml
+    ports:
+      - "3101:3100"                                   # loki needs to be exposed so it receives logs
+    environment:
+      - JAEGER_AGENT_HOST=tempo
+      - JAEGER_ENDPOINT=http://tempo:14268/api/traces # send traces to Tempo
+      - JAEGER_SAMPLER_TYPE=const
+      - JAEGER_SAMPLER_PARAM=1
+    volumes:
+      - ./etc/loki-local.yaml:/etc/loki/loki-local.yaml
+      - ./data/loki-data:/tmp/loki
+
+  rabbitmq:
+    image: rabbitmq:3.7.28-management
+    #container_name: rabbitmq
+    volumes:
+        - ./etc/rabbitmq/:/etc/rabbitmq/
+        - ./data/rabbitmq/data/:/var/lib/rabbitmq/
+        - ./data/rabbitmq/logs/:/var/log/rabbitmq/
+    environment:
+        RABBITMQ_ERLANG_COOKIE: ${RABBITMQ_ERLANG_COOKIE:-secret_cookie}
+        RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-admin}
+        RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-admin}
+    ports:
+        - 5672:5672    #amqp
+        - 15672:15672  #http
+        - 15692:15692  #prometheus
+
+  redis:
+    image: "redis:alpine"
+    #command: redis-server --requirepass sOmE_sEcUrE_pAsS
+    #hostname: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis-data:/var/lib/redis
+      - ./etc/redis.conf:/usr/local/etc/redis/redis.conf
+    environment:
+     - REDIS_REPLICATION_MODE=maste
+
+  provider1-db:
+    image: postgres
+    restart: always
+    environment:
+      - POSTGRES_DB=provider1
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgrespassword
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    ports:
+      - 5432:5432
+    volumes:
+      - ./demo-provider/db/data:/var/lib/postgresql
+      - ./demo-provider/db/scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  pgadmin:
+    image: dpage/pgadmin4
+    ports:
+      - 7070:80
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: pgadmin4@pgadmin.org
+      PGADMIN_DEFAULT_PASSWORD: admin
+    depends_on:
+      - provider1-db
+
+  tempo:
+    image: grafana/tempo:latest
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./etc/tempo-local.yaml:/etc/tempo.yaml
+      - ./data/tempo-data:/tmp/tempo
+    ports:
+      - "14268"  # jaeger ingest, Jaeger - Thrift HTTP
+      - "14250"  # Jaeger - GRPC
+      - "55680"  # OpenTelemetry
+      - "3100"   # tempo
+
+  tempo-query:
+    image: grafana/tempo-query:latest
+    command: ["--grpc-storage-plugin.configuration-file=/etc/tempo-query.yaml"]
+    volumes:
+      - ./etc/tempo-query.yaml:/etc/tempo-query.yaml
+    ports:
+      - "16686:16686"  # jaeger-ui
+    depends_on:
+      - tempo
+
+  demo-mq-consumer:
+    image: "oteldemo/demo-mq-consumer:0.0.1-SNAPSHOT"
+    command: 'sh /app/bin/start-app.sh' #/app/bin/wait-for.sh rabbitmq:5672 -t 50 -- 
+    ports:
+      - "8091:8091"
+    environment:
+      RMQ_USER: ${RABBITMQ_DEFAULT_USER:-admin}
+      RMQ_PASS: ${RABBITMQ_DEFAULT_PASS:-admin}
+      REDIS_CLUSTER_NODES: ${REDIS_CLUSTER_NODES:-redis:6379}
+      REDIS_CLUSTER_MAX_REDIRECTS: ${REDIS_CLUSTER_MAX_REDIRECTS:-3}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+    volumes:
+      - ./data/logs:/app/logs
+      #- ./etc/wait-for.sh:/app/bin/wait-for.sh   #https://github.com/eficode/wait-for
+    depends_on:
+      - rabbitmq
+      - redis
+
+  demo-provider:
+    image: "oteldemo/demo-provider:0.0.1-SNAPSHOT"
+    ports:
+      - "8090:8090"
+    environment:
+      PROVIDER1_DB_URL: jdbc:postgresql://provider1-db:5432/provider1
+      PROVIDER1_DB_USER: postgres
+      PROVIDER1_DB_PASS: postgrespassword
+    volumes:
+      - ./data/logs:/app/logs
+    depends_on:
+      - tempo
+      - provider1-db
+
+  demo-api:
+    image: "oteldemo/demo-api:0.0.1-SNAPSHOT"
+    ports:
+      - "8080:8080"
+    environment:
+      PROVIDER1_URL_BASE: "http://demo-provider:8090"
+      RMQ_USER: ${RABBITMQ_DEFAULT_USER:-admin}
+      RMQ_PASS: ${RABBITMQ_DEFAULT_PASS:-admin}
+    volumes:
+      - ./data/logs:/app/logs
+    depends_on:
+      - demo-provider
+      - demo-mq-consumer
+
+  promtail:
+    image: grafana/promtail:main
+    command: -config.file=/etc/promtail/promtail-local.yaml
+    volumes:
+      - ./etc/promtail-local.yaml:/etc/promtail/promtail-local.yaml
+      - ./data/logs:/app/logs
+    depends_on:
+      - demo-api
+      - loki
+
+  volume_exporter:
+    image: mnadeem/volume_exporter
+    command: ["--volume-dir=tempo:/tmp/tempo", "--volume-dir=logs:/app/logs", "--volume-dir=loki:/tmp/loki"]
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data/tempo-data:/tmp/tempo
+      - ./data/loki-data:/tmp/loki
+    ports:
+      - 9889:9888
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./etc/prometheus.yaml:/etc/prometheus.yaml
+    entrypoint:
+      - /bin/prometheus
+      - --config.file=/etc/prometheus.yaml
+    ports:
+      - "9090:9090"
+    depends_on:
+      - demo-api
+
+  grafana:
+    image: grafana/grafana:latest-ubuntu
+    volumes:
+      - ./data/grafana-data/datasources:/etc/grafana/provisioning/datasources
+      - ./data/grafana-data/dashboards-provisioning:/etc/grafana/provisioning/dashboards
+      - ./data/grafana-data/dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - tempo-query
+      - loki
