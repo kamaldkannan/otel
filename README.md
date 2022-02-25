@@ -28,6 +28,7 @@ Images
 docker image ls
 
 ````
+Multiple micro-services with **db**, **MQ (Rabbit)**, **redis** and **rest** interactions
 
 
 ````bash
@@ -47,26 +48,7 @@ And then either `docker compose` or `docker stack`
 docker-compose up
 ````
 
-## Docker Stack
 
-````bash
-docker swarm init
-docker stack deploy --compose-file docker-compose.yaml trace
-docker stack services trace
-docker stack rm trace
-````
-
-# Variations 
-
-There are two variations **basic** and **complex**, both version have support for `0.15.0`, `0.16.0` and `0.17.0` in its own branches.
-
-## Basic
-
-Multiple micro-services with **db** and **rest** interactions
-
-## Complex
-
-Multiple micro-services with **db**, **MQ (Rabbit)**, **redis** and **rest** interactions
 
 # Tracing
 
@@ -112,10 +94,6 @@ You can view it in [Grafana](http://localhost:3000/explore?orgId=1&left=%5B%22no
 ![](docs/img/pgAdminDb.png)
 
 
-# Credits
-
-* [otel-demo](https://github.com/williewheeler/otel-demo)
-* [java-agent-spring-boot-example](https://github.com/objectiser/java-agent-spring-boot-example)
 
 
 # Also See
